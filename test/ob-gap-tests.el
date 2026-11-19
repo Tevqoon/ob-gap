@@ -191,6 +191,54 @@ f(100);
                      "5050\n"))
     (ob-gap-test-kill-sessions)))
 
+(ert-deftest ob-gap/session-missing-semicolon ()
+  ;; Used to hang: the trailing statement swallowed the end marker.
+  (unwind-protect
+      (let ((org-babel-gap-session-timeout 20))
+        (let ((res (ob-gap-test-run "#+begin_src gap :session t5
+1+1;
+2+2
+#+end_src")))
+          (should (string-match-p "\\`2\n" res))
+          (should (string-match-p "Syntax error" res)))
+        ;; The session is still usable afterwards.
+        (should (equal (ob-gap-test-run "#+begin_src gap :session t5
+3+3;
+#+end_src")
+                       "6\n")))
+    (ob-gap-test-kill-sessions)))
+
+(ert-deftest ob-gap/session-unclosed-block ()
+  (unwind-protect
+      (let ((org-babel-gap-session-timeout 20))
+        (should (string-match-p "Syntax error"
+                                (ob-gap-test-run "#+begin_src gap :session t6
+if true then
+  Print(1);
+#+end_src")))
+        (should (equal (ob-gap-test-run "#+begin_src gap :session t6
+\"still alive\";
+#+end_src")
+                       "\"still alive\"\n")))
+    (ob-gap-test-kill-sessions)))
+
+(ert-deftest ob-gap/session-value-with-double-semicolon ()
+  (unwind-protect
+      (should (equal (ob-gap-test-run "#+begin_src gap :session t7 :results value
+Print(\"noise\\n\");
+Factorial(6);;
+#+end_src")
+                     720))
+    (ob-gap-test-kill-sessions)))
+
+(ert-deftest ob-gap/batch-missing-semicolon ()
+  (ob-gap-test-run "#+begin_src gap
+1+1;
+2+2
+#+end_src")
+  (should (with-current-buffer org-babel-error-buffer-name
+            (string-match-p "Syntax error" (buffer-string)))))
+
 ;;; Tangling
 
 (ert-deftest ob-gap/tangle ()

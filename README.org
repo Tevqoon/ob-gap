@@ -125,11 +125,14 @@ Size(Centre(G));
   =*gap-foo*=.
 - =C-c C-v z= jumps to the session buffer; =C-c C-v l= loads a block
   into it.
-- In sessions, errors print a message and return to the main loop
-  (=BreakOnError := false=), so the session keeps running.
-- If a block leaves a construct open (a missing =fi;= or =end;=), Emacs
-  waits for GAP forever. Press =C-g=, or set
-  =org-babel-gap-session-timeout=.
+- Each block is read by GAP as one unit, so a missing =;= or an
+  unclosed =if=/=function= gives a syntax error instead of hanging.
+- Errors print a message and return to the main loop
+  (=BreakOnError := false=), so the session keeps running. Like typing
+  into the GAP prompt, the statements after a runtime error still run.
+  (Batch mode stops at the first runtime error.)
+- A long computation can be interrupted with =C-g=; set
+  =org-babel-gap-session-timeout= to give up automatically.
 
 ** Multi-block code without a session
 

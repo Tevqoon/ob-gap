@@ -107,6 +107,25 @@ Waiting can always be interrupted with \\[keyboard-quit]."
 (defconst org-babel-gap-eoe "org_babel_gap_eoe"
   "Marker printed by GAP after each session evaluation.")
 
+(defconst org-babel-gap--session-init
+  "BreakOnError := false;;
+OrgBabelGapLast := fail;;
+OrgBabelGapRun := function(file)
+  local res, r;
+  res := READ_ALL_COMMANDS(InputTextFile(file), false, false,
+                           function(v) View(v); Print(\"\\n\"); end);
+  for r in res do
+    if r[1] and IsBound(r[2]) then OrgBabelGapLast := r[2]; fi;
+  od;
+end;;"
+  "GAP code run when a session starts.
+Errors return to the main loop instead of a break loop.
+`OrgBabelGapRun' reads a whole file of statements, echoing values
+like the GAP prompt does.  Because the file is read as one unit, a
+missing semicolon or unclosed block gives a syntax error at end of
+input instead of swallowing the following input.  The value of
+the last statement is kept in `OrgBabelGapLast'.")
+
 (defconst org-babel-gap--value-writer
   "OrgBabelGapWriteValue := function(x, file)
   local cell, row, s, out;
@@ -185,12 +204,14 @@ VAR-LINES, when given, replaces the assignments computed from PARAMS."
   (org-babel-expand-body:generic
    body params (or var-lines (org-babel-variable-assignments:gap params))))
 
-(defun org-babel-gap--value-epilogue (file)
-  "GAP code that writes the value of `last' to FILE."
-  (concat "if IsBoundGlobal(\"last\") then OrgBabelGapLast := last; "
-          "else OrgBabelGapLast := \"\"; fi;\n"
+(defun org-babel-gap--value-epilogue (file &optional variable)
+  "GAP code that writes the value of VARIABLE (default `last') to FILE."
+  (setq variable (or variable "last"))
+  (concat (format "if IsBoundGlobal(\"%s\") then OrgBabelGapValue := %s; "
+                  variable variable)
+          "else OrgBabelGapValue := \"\"; fi;\n"
           org-babel-gap--value-writer "\n"
-          "OrgBabelGapWriteValue(OrgBabelGapLast, "
+          "OrgBabelGapWriteValue(OrgBabelGapValue, "
           (org-babel-gap--quote-string
            (org-babel-process-file-name file 'noquote))
           ");\n"))
@@ -282,30 +303,43 @@ RESULT-TYPE is `output' or `value'.  CMDLINE is extra switches."
   (setq-local comint-prompt-regexp "^\\(gap\\|brk[_0-9]*\\)> *")
   (setq-local comint-process-echoes nil))
 
-(defun org-babel-gap--session-send (buffer code)
-  "Send CODE to the GAP session in BUFFER and return its output."
+(defun org-babel-gap--session-send (buffer code &optional display)
+  "Send CODE to the GAP session in BUFFER and return its output.
+DISPLAY, if non-nil, is shown in the session buffer instead of CODE."
   (let ((proc (get-buffer-process buffer)))
     (with-current-buffer buffer
       (goto-char (process-mark proc))
-      (insert code)
-      (comint-send-input nil t)
-      (let ((start (marker-position (process-mark proc)))
+      (insert (or display code) "\n")
+      (set-marker (process-mark proc) (point))
+      (let ((start (point))
             (eoe-re (concat "^" org-babel-gap-eoe "\n"))
             (deadline (and org-babel-gap-session-timeout
                            (+ (float-time) org-babel-gap-session-timeout))))
         (comint-send-string
-         proc (format "Print(\"\\n%s\\n\");\n" org-babel-gap-eoe))
+         proc (format "%s\nPrint(\"\\n%s\\n\");\n" code org-babel-gap-eoe))
         (while (progn
                  (goto-char start)
                  (not (re-search-forward eoe-re nil t)))
           (unless (process-live-p proc)
             (error "GAP session process died"))
           (when (and deadline (> (float-time) deadline))
-            (error "GAP session timed out (is a block left open?)"))
+            (error "GAP session timed out"))
           (accept-process-output proc 0.1))
         (let ((out (buffer-substring-no-properties start (match-beginning 0))))
+          (goto-char (point-max))
           ;; Drop the blank line printed in front of the marker.
           (string-remove-suffix "\n" out))))))
+
+(defun org-babel-gap--session-eval (buffer body)
+  "Evaluate BODY in the session BUFFER as one unit; return the output."
+  (let ((file (org-babel-temp-file "gap-session-" ".g")))
+    (with-temp-file file (insert body "\n"))
+    (org-babel-gap--session-send
+     buffer
+     (format "OrgBabelGapRun(%s);"
+             (org-babel-gap--quote-string
+              (org-babel-process-file-name file 'noquote)))
+     (string-trim-right body))))
 
 (defun org-babel-gap-initiate-session (&optional session _params)
   "Start the GAP session SESSION unless it is running; return its buffer.
@@ -319,17 +353,19 @@ Return nil when SESSION is \"none\"."
           (apply #'make-comint-in-buffer "gap" buffer
                  (org-babel-gap--command) nil org-babel-gap-session-switches)
           (with-current-buffer buffer (org-babel-gap-session-mode))
-          ;; Errors return to the main loop instead of a break loop.
-          (org-babel-gap--session-send buffer "BreakOnError := false;;")))
+          (org-babel-gap--session-send buffer org-babel-gap--session-init
+                                       "# ob-gap session started")))
       (get-buffer name))))
 
 (defun org-babel-gap--evaluate-session (buffer body result-type)
   "Evaluate BODY in the session BUFFER.
 Return a result triple as for `org-babel-gap--format-result'."
-  (let ((output (org-babel-gap--clean (org-babel-gap--session-send buffer body))))
+  (let ((output (org-babel-gap--clean (org-babel-gap--session-eval buffer body))))
     (if (eq result-type 'value)
         (let ((file (org-babel-temp-file "gap-value-")))
-          (org-babel-gap--session-send buffer (org-babel-gap--value-epilogue file))
+          (org-babel-gap--session-send
+           buffer (org-babel-gap--value-epilogue file "OrgBabelGapLast")
+           "# ob-gap: reading value")
           (org-babel-gap--value-result file))
       (list output nil nil))))
 
@@ -337,14 +373,14 @@ Return a result triple as for `org-babel-gap--format-result'."
   "Start SESSION and assign the `:var's in PARAMS in it."
   (let ((buffer (org-babel-gap-initiate-session session params)))
     (dolist (line (org-babel-variable-assignments:gap params))
-      (org-babel-gap--session-send buffer line))
+      (org-babel-gap--session-eval buffer line))
     buffer))
 
 (defun org-babel-load-session:gap (session body params)
   "Load BODY into SESSION, expanded with PARAMS."
   (save-window-excursion
     (let ((buffer (org-babel-prep-session:gap session params)))
-      (org-babel-gap--session-send buffer (org-babel-expand-body:gap body params nil))
+      (org-babel-gap--session-eval buffer (org-babel-expand-body:gap body params nil))
       buffer)))
 
 ;;; Entry point
