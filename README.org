@@ -1,0 +1,180 @@
+#+title: ob-gap — Org Babel support for GAP
+
+#+begin_quote
+*⚠️ Vibecode warning.* This package was written largely by an AI model
+(Claude) in one sitting, then checked against a test suite on GAP 4.12
+and Emacs 29 / Org 9.6. Nobody has used it in anger yet. It may have
+bugs, odd edge cases or design choices a careful human wouldn't make.
+Read the code before relying on it for anything important, and please
+open an issue if something breaks.
+#+end_quote
+
+Evaluate [[https://www.gap-system.org][GAP]] code in Org mode source blocks. This is a full rewrite of
+[[https://github.com/cjrl/babel-gap][cjrl/babel-gap]], which was the Org Babel language template plus a
+one-line execute function.
+
+* Features
+
+- Batch evaluation: each block runs in a fresh =gap= process
+- =:session=: a persistent GAP process, so definitions carry over
+  between blocks
+- =:var=: numbers, strings, lists and Org tables become GAP values
+- =:results output= (the default) and =:results value=; a GAP list of
+  lists comes back as an Org table
+- =:cmdline=, =:prologue=, =:epilogue=
+- GAP errors are reported instead of silently falling into a break loop
+- Tangling to =.g= files, including the =:var= assignments
+- =:noweb=, =:dir=, =:wrap=, =:post=, =:cache= and the rest of the
+  Org-core header arguments work as usual
+
+* Installation
+
+Requires Emacs 27.1+ and Org 9.4+. [[https://github.com/gap-system/gap-mode][gap-mode]] is optional but
+recommended, for editing blocks with =C-c '=.
+
+#+begin_src emacs-lisp
+(use-package gap-mode
+  :custom
+  (gap-executable "/opt/homebrew/bin/gap"))
+
+(use-package ob-gap
+  :vc (:url "https://github.com/Tevqoon/ob-gap")
+  :after org
+  :custom
+  ;; -A skips autoloading suggested packages: faster startup.
+  (org-babel-gap-switches '("-q" "-b" "-A"))
+  :config
+  (add-to-list 'org-babel-load-languages '(gap . t))
+  (setq org-babel-default-header-args:gap
+        '((:results . "output replace")
+          (:wrap . "example gap"))))
+#+end_src
+
+ob-gap finds GAP in this order: =org-babel-gap-command=, then
+=gap-executable= from gap-mode, then =gap= on =exec-path=.
+
+*If you used the old package with your own =org-babel-execute:gap=
+override in your config, delete that override.* Otherwise it replaces
+this package's version and none of the features above will work.
+
+* Usage
+
+** Output (default)
+
+GAP echoes the value of every statement ending in a single =;=. End a
+statement with =;;= to keep it quiet.
+
+#+begin_src org
+,#+begin_src gap
+G := SymmetricGroup(4);;
+Size(G);
+List(ConjugacyClasses(G), Size);
+,#+end_src
+
+,#+RESULTS:
+: 24
+: [ 1, 6, 3, 8, 6 ]
+#+end_src
+
+** Value
+
+=:results value= returns GAP's =last=, the value of the last
+statement evaluated (including statements ending in =;;=). A list of
+lists becomes a table, a flat list a one-row table, and anything else
+a string. Cells that look like numbers become numbers.
+
+#+begin_src org
+,#+begin_src gap :results value
+List([1..4], n -> [n, Factorial(n)]);
+,#+end_src
+
+,#+RESULTS:
+| 1 |  1 |
+| 2 |  2 |
+| 3 |  6 |
+| 4 | 24 |
+#+end_src
+
+** Variables
+
+#+begin_src org
+,#+name: gens
+| 1 | 2 | 3 |
+
+,#+begin_src gap :var g=gens :var name="cycle"
+Print(name, ": ", PermList(g[1]{[2, 3, 1]}), "\n");
+,#+end_src
+#+end_src
+
+Org tables arrive as lists of lists (one-row tables as a list of one
+list), strings as GAP strings, =t= as =true=.
+
+** Sessions
+
+#+begin_src org
+,#+begin_src gap :session
+G := DihedralGroup(16);;
+,#+end_src
+
+,#+begin_src gap :session
+Size(Centre(G));
+,#+end_src
+#+end_src
+
+- =:session= with no name uses the buffer =*gap*=; =:session foo= uses
+  =*gap-foo*=.
+- =C-c C-v z= jumps to the session buffer; =C-c C-v l= loads a block
+  into it.
+- In sessions, errors print a message and return to the main loop
+  (=BreakOnError := false=), so the session keeps running.
+- If a block leaves a construct open (a missing =fi;= or =end;=), Emacs
+  waits for GAP forever. Press =C-g=, or set
+  =org-babel-gap-session-timeout=.
+
+** Multi-block code without a session
+
+Noweb references re-run the referenced code each time:
+
+#+begin_src org
+,#+name: defs
+,#+begin_src gap
+f := x -> x^2;;
+,#+end_src
+
+,#+begin_src gap :noweb yes
+<<defs>>
+f(5);
+,#+end_src
+#+end_src
+
+* Options
+
+| Variable                         | Default         | Meaning                                         |
+|----------------------------------+-----------------+-------------------------------------------------|
+| =org-babel-gap-command=          | =nil= (auto)    | GAP executable                                  |
+| =org-babel-gap-switches=         | =("-q" "-b")=   | Switches for batch evaluation                   |
+| =org-babel-gap-session-switches= | =("-q")=        | Switches for sessions                           |
+| =org-babel-gap-quit-on-break=    | =t=             | Pass =--quitonbreak= in batch mode              |
+| =org-babel-gap-session-timeout=  | =nil=           | Seconds to wait for a session block, or forever |
+
+* Known limitations
+
+- No =:async= yet.
+- =:results value= can't tell a GAP string ="12"= from the number 12.
+- =:colnames yes= only puts the header back when the result has the
+  same number of columns as the input table (standard Org behaviour).
+- Remote =:dir= (TRAMP) is untested.
+- Batch evaluation starts GAP for every block (about a second each).
+  Use a session if that adds up.
+
+* Development
+
+#+begin_src sh
+make compile   # byte-compile, warnings are errors
+make test      # ERT suite; needs gap on PATH or ORG_BABEL_GAP_COMMAND
+#+end_src
+
+* Credits and license
+
+Based on [[https://github.com/cjrl/babel-gap][babel-gap]] by Chris Lloyd, itself based on the Org Babel
+language template. GPL-3.0-or-later, see [[file:LICENSE][LICENSE]].
